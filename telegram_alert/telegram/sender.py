@@ -58,50 +58,13 @@ class OutboxSender:
 
     async def _handle(self, payload: dict, attempt: int) -> None:
         job = OutboxJob.model_validate(payload)
-        if job.action == "photo_alert":
-            await self._send_photo_alert(job)
-        elif job.action == "clip":
-            await self._send_clip(job)
-        else:
+        if job.action == "attach_clip":
             await self._attach_clip(job)
-
-    async def _send_clip(self, job: OutboxJob) -> None:
-        """On-demand /clip: upload the clip bytes as a playable video (Telegram's
-        fetch-by-URL is unreliable). Fall back to the snapshot photo if there's
-        no clip or the video upload is rejected."""
-        caption = clip_caption(job.camera, job.ts, self._s.app.tzinfo)
-        clip_bytes = await self._storage.get(job.clip_key) if job.clip_key else None
-        snap = await self._storage.get(job.snap_key) if job.snap_key else None
-
-        for uid in await self._recipients():
-            async with self._sf() as session:
-                if await repo.was_sent_to(session, job.review_id, uid):
-                    continue
-            msg = None
-            if clip_bytes is not None:
-                video = BufferedInputFile(clip_bytes, filename="clip.mp4")
-                try:
-                    msg = await self._bot.send_video(
-                        uid, video, caption=caption, supports_streaming=True
-                    )
-                except TelegramForbiddenError:
-                    continue  # user blocked the bot
-                except TelegramBadRequest as e:
-                    log.warning("send_video failed for %s, falling back to photo: %s", uid, e)
-                    msg = None
-            if msg is None and snap is not None:
-                photo = BufferedInputFile(snap, filename="snap.jpg")
-                try:
-                    msg = await self._bot.send_photo(uid, photo, caption=caption)
-                except _PERMANENT as e:
-                    log.warning("clip photo fallback to %s skipped: %s", uid, e)
-                    continue
-            # Network/proxy errors propagate -> the whole job is retried later.
-            if msg is not None:
-                async with self._sf() as session:
-                    await repo.record_sent(
-                        session, job.review_id, uid, msg.message_id, clip_attached=True
-                    )
+        else:
+            # photo_alert (event) and clip (/clip) are identical: a photo with a
+            # caption and, when the clip is archived, a button linking to the
+            # MinIO video. Only the caption text differs.
+            await self._send_photo(job)
 
     async def _recipients(self) -> list[int]:
         async with self._sf() as session:
@@ -109,12 +72,17 @@ class OutboxSender:
         # Superusers always receive alerts, even if they never pressed /start.
         return list(dict.fromkeys([*ids, *self._s.telegram.superuser_ids]))
 
-    async def _send_photo_alert(self, job: OutboxJob) -> None:
+    async def _send_photo(self, job: OutboxJob) -> None:
         assert job.snap_key
         data = await self._storage.get(job.snap_key)
-        caption = alert_caption(job.camera, job.ts, self._s.app.tzinfo)
+        tz = self._s.app.tzinfo
+        if job.action == "clip":
+            caption = clip_caption(job.camera, job.ts, tz)
+        else:
+            caption = alert_caption(job.camera, job.ts, tz)
 
-        # If the clip is already archived (e.g. /test), attach the button now.
+        # If the clip is already archived (always for /clip; for events once the
+        # clip is ready), attach the video button right away.
         kb = None
         if job.clip_key:
             url = await self._storage.presigned_get(job.clip_key)
@@ -128,7 +96,7 @@ class OutboxSender:
             try:
                 msg = await self._bot.send_photo(uid, photo, caption=caption, reply_markup=kb)
             except _PERMANENT as e:
-                log.warning("photo_alert to %s skipped permanently: %s", uid, e)
+                log.warning("photo to %s skipped permanently: %s", uid, e)
                 continue
             # Any other error (network/proxy/5xx) propagates -> delayed retry.
             async with self._sf() as session:

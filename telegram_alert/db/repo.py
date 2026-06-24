@@ -72,8 +72,16 @@ async def get_settings_row(session: AsyncSession) -> Settings:
 
 
 async def set_mode(session: AsyncSession, mode: str) -> None:
+    # Switching mode always clears any temporary schedule override.
     await session.execute(
-        update(Settings).where(Settings.id == 1).values(mode=mode)
+        update(Settings).where(Settings.id == 1).values(mode=mode, override="none")
+    )
+    await session.commit()
+
+
+async def set_override(session: AsyncSession, override: str) -> None:
+    await session.execute(
+        update(Settings).where(Settings.id == 1).values(override=override)
     )
     await session.commit()
 

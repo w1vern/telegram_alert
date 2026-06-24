@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from telegram_alert.modes import AlertMode
+from telegram_alert.modes import AlertMode, ScheduleOverride
 
 
 @dataclass(frozen=True)
@@ -43,12 +43,21 @@ def is_suppressed_by_schedule(now: datetime, windows: list[Window]) -> bool:
     return any(_in_window(weekday, minute_of_day, w) for w in windows)
 
 
-def should_notify(now: datetime, mode: AlertMode, windows: list[Window]) -> bool:
+def should_notify(
+    now: datetime,
+    mode: AlertMode,
+    windows: list[Window],
+    override: ScheduleOverride = ScheduleOverride.NONE,
+) -> bool:
     if mode == AlertMode.OFF:
         return False
     if mode == AlertMode.ALWAYS:
         return True
-    # SCHEDULE
+    # SCHEDULE — a temporary override wins over the windows when set.
+    if override == ScheduleOverride.MUTE:
+        return False
+    if override == ScheduleOverride.UNMUTE:
+        return True
     return not is_suppressed_by_schedule(now, windows)
 
 

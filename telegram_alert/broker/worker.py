@@ -17,7 +17,7 @@ from telegram_alert.broker.amqp import Broker
 from telegram_alert.broker.jobs import MediaJob, OutboxJob
 from telegram_alert.config import Settings
 from telegram_alert.db import repo
-from telegram_alert.modes import parse_mode
+from telegram_alert.modes import parse_mode, parse_override
 from telegram_alert.services.frigate import ClipNotReady, FrigateClient
 from telegram_alert.services.schedule import Window, should_notify
 from telegram_alert.services.storage import MinioStorage
@@ -158,4 +158,6 @@ class MediaWorker:
             row = await repo.get_settings_row(session)
             entries = await repo.list_schedule(session)
         windows = [Window(e.weekday, e.start_min, e.end_min) for e in entries]
-        return should_notify(now, parse_mode(row.mode), windows)
+        return should_notify(
+            now, parse_mode(row.mode), windows, parse_override(row.override)
+        )

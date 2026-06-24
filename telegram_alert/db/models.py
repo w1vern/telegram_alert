@@ -43,6 +43,9 @@ class Settings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     mode: Mapped[str] = mapped_column(String(16), default="schedule")
+    # Temporary manual deviation in SCHEDULE mode: "none" / "mute" / "unmute"
+    # (see :class:`telegram_alert.modes.ScheduleOverride`). Cleared on mode change.
+    override: Mapped[str] = mapped_column(String(16), default="none", server_default="none")
 
 
 class ScheduleEntry(Base):

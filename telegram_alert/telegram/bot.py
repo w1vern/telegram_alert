@@ -78,6 +78,9 @@ BASE_COMMANDS = [
     BotCommand(command="mode", description="Режим алертов"),
     BotCommand(command="schedule", description="Окна присутствия"),
     BotCommand(command="clip", description="Запись последних действий со всех камер"),
+    BotCommand(command="mute", description="Временно заглушить (по расписанию)"),
+    BotCommand(command="unmute", description="Временно включить (по расписанию)"),
+    BotCommand(command="auto", description="Сбросить override, вернуть расписание"),
     BotCommand(command="help", description="Список команд"),
 ]
 

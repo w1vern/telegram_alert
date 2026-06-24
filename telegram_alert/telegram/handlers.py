@@ -21,7 +21,15 @@ from telegram_alert.broker.amqp import Broker
 from telegram_alert.broker.jobs import MediaJob
 from telegram_alert.config import Settings
 from telegram_alert.db import repo
-from telegram_alert.modes import MODE_HINTS, MODE_LABELS, AlertMode, parse_mode
+from telegram_alert.modes import (
+    MODE_HINTS,
+    MODE_LABELS,
+    OVERRIDE_LABELS,
+    AlertMode,
+    ScheduleOverride,
+    parse_mode,
+    parse_override,
+)
 from telegram_alert.services.frigate import FrigateClient
 from telegram_alert.services.schedule import (
     Window,
@@ -54,11 +62,13 @@ def _is_superuser(settings: Settings, uid: int) -> bool:
 
 # --- helpers -------------------------------------------------------------
 
-async def _load(session: AsyncSession) -> tuple[AlertMode, list[Window]]:
+async def _load(
+    session: AsyncSession,
+) -> tuple[AlertMode, list[Window], ScheduleOverride]:
     row = await repo.get_settings_row(session)
     entries = await repo.list_schedule(session)
     windows = [Window(e.weekday, e.start_min, e.end_min) for e in entries]
-    return parse_mode(row.mode), windows
+    return parse_mode(row.mode), windows, parse_override(row.override)
 
 
 def _day_text(weekday: int, windows: list[Window]) -> str:
@@ -122,7 +132,11 @@ async def cmd_help(message: Message, settings: Settings) -> None:
         "/status — текущее состояние\n"
         "/mode — режим алертов: отключены / всегда / по расписанию\n"
         "/schedule — окна присутствия (для режима «по расписанию»)\n"
-        "/test — настоящий тестовый алерт всем авторизованным"
+        "/clip — запись последних действий со всех камер\n"
+        "\nВ режиме «по расписанию» (поверх расписания, до /auto):\n"
+        "/mute — временно заглушить уведомления\n"
+        "/unmute — временно включить уведомления\n"
+        "/auto — сбросить, вернуться к расписанию"
     )
     if _is_superuser(settings, message.from_user.id):
         base += (
@@ -242,14 +256,16 @@ async def cmd_status(
     settings: Settings,
 ) -> None:
     async with session_factory() as session:
-        mode, windows = await _load(session)
+        mode, windows, override = await _load(session)
     now = datetime.now(tz=settings.app.tzinfo)
-    active = should_notify(now, mode, windows)
+    active = should_notify(now, mode, windows, override)
     lines = [
         f"Режим: <b>{MODE_LABELS[mode]}</b> ({MODE_HINTS[mode]})",
         f"➡️ Сейчас: <b>{'АКТИВНО — шлём' if active else 'подавлено'}</b>",
     ]
     if mode == AlertMode.SCHEDULE:
+        if override != ScheduleOverride.NONE:
+            lines.append(f"⏸ Override: <b>{OVERRIDE_LABELS[override]}</b> (/auto — сбросить)")
         today = now.weekday()
         day_windows = windows_for_day(windows, today)
         if day_windows:
@@ -269,7 +285,7 @@ async def cmd_mode(
     message: Message, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     async with session_factory() as session:
-        mode, _ = await _load(session)
+        mode, _, _ = await _load(session)
     await message.answer(_mode_text(mode), reply_markup=mode_keyboard(mode))
 
 
@@ -298,6 +314,62 @@ async def cb_mode_schedule(query: CallbackQuery, session_factory) -> None:
 @router.callback_query(Cb.filter(F.a == "noop"))
 async def cb_noop(query: CallbackQuery) -> None:
     await query.answer("Видео для этого события недоступно")
+
+
+# --- temporary override (only in SCHEDULE mode) -------------------------
+
+async def _set_override(
+    message: Message,
+    session_factory: async_sessionmaker[AsyncSession],
+    value: ScheduleOverride,
+    ok_text: str,
+) -> None:
+    """Apply a temporary override, but only while in SCHEDULE mode.  Any new
+    override replaces the previous one (single global value)."""
+    async with session_factory() as session:
+        row = await repo.get_settings_row(session)
+        mode = parse_mode(row.mode)
+        if mode != AlertMode.SCHEDULE:
+            await message.answer(
+                f"⚠️ Работает только в режиме «{MODE_LABELS[AlertMode.SCHEDULE]}».\n"
+                f"Сейчас: <b>{MODE_LABELS[mode]}</b>. Сменить — /mode."
+            )
+            return
+        await repo.set_override(session, value.value)
+    await message.answer(ok_text)
+
+
+@router.message(Command("mute"))
+async def cmd_mute(
+    message: Message, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _set_override(
+        message,
+        session_factory,
+        ScheduleOverride.MUTE,
+        "🔕 Уведомления временно заглушены поверх расписания.\n/auto — вернуть расписание.",
+    )
+
+
+@router.message(Command("unmute"))
+async def cmd_unmute(
+    message: Message, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _set_override(
+        message,
+        session_factory,
+        ScheduleOverride.UNMUTE,
+        "🔔 Уведомления временно включены поверх расписания.\n/auto — вернуть расписание.",
+    )
+
+
+@router.message(Command("auto"))
+async def cmd_auto(
+    message: Message, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with session_factory() as session:
+        await repo.set_override(session, ScheduleOverride.NONE.value)
+    await message.answer("🔄 Сброшено — уведомления снова по расписанию.")
 
 
 # --- /test ---------------------------------------------------------------
