@@ -13,6 +13,11 @@ def alert_caption(camera: str, ts: float, tz: ZoneInfo) -> str:
     return f"🚨 {camera} · человек · {when}"
 
 
+def clip_caption(camera: str, ts: float, tz: ZoneInfo) -> str:
+    when = datetime.fromtimestamp(ts, tz).strftime("%H:%M:%S %d.%m.%Y") if ts else "—"
+    return f"🎥 {camera} · запись · {when}"
+
+
 def clip_keyboard(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🎬 Видео", url=url)]]

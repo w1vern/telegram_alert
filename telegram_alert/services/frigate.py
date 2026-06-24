@@ -56,6 +56,39 @@ class FrigateClient:
             resp = await self._client.get(path)
         return resp
 
+    async def list_cameras(self) -> list[str]:
+        resp = await self._get("/api/config")
+        resp.raise_for_status()
+        cfg = resp.json()
+        return list((cfg.get("cameras") or {}).keys())
+
+    async def get_camera_snapshot(self, camera: str) -> bytes:
+        """Current frame from the camera (independent of any event)."""
+        resp = await self._get(f"/api/{camera}/latest.jpg")
+        resp.raise_for_status()
+        return resp.content
+
+    async def get_recording_clip(self, camera: str, start: float, end: float) -> bytes:
+        """Fixed-length clip cut from continuous recordings [start, end].
+
+        Frigate generates the mp4 on demand, so retry briefly until it's ready.
+        """
+        path = f"/api/{camera}/start/{start:.3f}/end/{end:.3f}/clip.mp4"
+        deadline = asyncio.get_event_loop().time() + self._cfg.clip_timeout
+        delay = 2.0
+        last_status = None
+        while True:
+            resp = await self._get(path)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+            last_status = resp.status_code
+            if asyncio.get_event_loop().time() >= deadline:
+                raise ClipNotReady(
+                    f"recording clip for {camera} not ready (last status {last_status})"
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 8.0)
+
     async def get_snapshot(self, event_id: str) -> bytes:
         resp = await self._get(f"/api/events/{event_id}/snapshot.jpg")
         resp.raise_for_status()

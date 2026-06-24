@@ -1,19 +1,19 @@
 """Notification-suppression logic.
 
-``should_notify(now)`` decides whether an alert should be delivered, in the
-dacha timezone.  Rules (in order):
+``should_notify(now, mode, windows)`` decides whether an alert is delivered, in
+the dacha timezone, based on the global tri-state mode:
 
-1. master switch off  -> never notify;
-2. active snooze       -> never notify;
-3. away mode on        -> always notify (overrides schedule: nobody home);
-4. now inside a presence window for the current weekday -> suppress;
-5. otherwise           -> notify.
+* OFF      -> never notify (someone is at the dacha);
+* ALWAYS   -> always notify (ignore the schedule);
+* SCHEDULE -> notify unless ``now`` falls inside a presence window for today.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+
+from telegram_alert.modes import AlertMode
 
 
 @dataclass(frozen=True)
@@ -43,24 +43,13 @@ def is_suppressed_by_schedule(now: datetime, windows: list[Window]) -> bool:
     return any(_in_window(weekday, minute_of_day, w) for w in windows)
 
 
-@dataclass
-class SuppressionState:
-    notifications_enabled: bool
-    away_mode: bool
-    snooze_until: int | None
-    windows: list[Window]
-
-
-def should_notify(now: datetime, state: SuppressionState) -> bool:
-    if not state.notifications_enabled:
+def should_notify(now: datetime, mode: AlertMode, windows: list[Window]) -> bool:
+    if mode == AlertMode.OFF:
         return False
-    if state.snooze_until is not None and now.timestamp() < state.snooze_until:
-        return False
-    if state.away_mode:
+    if mode == AlertMode.ALWAYS:
         return True
-    if is_suppressed_by_schedule(now, state.windows):
-        return False
-    return True
+    # SCHEDULE
+    return not is_suppressed_by_schedule(now, windows)
 
 
 def windows_for_day(windows: list[Window], weekday: int) -> list[Window]:

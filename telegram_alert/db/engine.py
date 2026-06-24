@@ -28,5 +28,5 @@ async def init_db(engine: AsyncEngine, session_factory: async_sessionmaker[Async
     async with session_factory() as session:
         existing = await session.get(Settings, 1)
         if existing is None:
-            session.add(Settings(id=1, notifications_enabled=True, away_mode=False))
+            session.add(Settings(id=1, mode="schedule"))
             await session.commit()

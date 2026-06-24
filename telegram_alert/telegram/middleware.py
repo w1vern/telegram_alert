@@ -20,13 +20,19 @@ class AuthMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         sf: async_sessionmaker[AsyncSession] = data["session_factory"]
+        settings = data["settings"]
 
-        # /start (with or without secret) is always allowed through.
-        if isinstance(event, Message) and (event.text or "").startswith("/start"):
-            return await handler(event, data)
+        # Public commands available to anyone (needed to begin using the bot).
+        if isinstance(event, Message):
+            text = event.text or ""
+            if text.startswith(("/start", "/help")):
+                return await handler(event, data)
 
         user = data.get("event_from_user")
         if user is None:
+            return await handler(event, data)
+
+        if user.id in settings.telegram.superuser_ids:
             return await handler(event, data)
 
         async with sf() as session:

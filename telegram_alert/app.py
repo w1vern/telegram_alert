@@ -13,7 +13,7 @@ from telegram_alert.logging_conf import setup_logging
 from telegram_alert.mqtt.consumer import MqttIngress
 from telegram_alert.services.frigate import FrigateClient
 from telegram_alert.services.storage import MinioStorage
-from telegram_alert.telegram.bot import build_bot, build_dispatcher
+from telegram_alert.telegram.bot import build_bot, build_dispatcher, setup_commands
 from telegram_alert.telegram.sender import OutboxSender
 
 log = logging.getLogger(__name__)
@@ -46,9 +46,22 @@ async def main() -> None:
 
     mqtt = MqttIngress(settings.mqtt, broker)
 
+    # Remove any leftover webhook (it would make getUpdates return 409). Keep
+    # pending updates so commands/alerts queued during downtime aren't lost.
+    me = await bot.get_me()
+    log.info("Telegram bot @%s id=%s; ensuring polling mode", me.username, me.id)
+    await bot.delete_webhook(drop_pending_updates=False)
+    await setup_commands(bot, settings.telegram.superuser_ids)
+
     try:
         await asyncio.gather(
-            dp.start_polling(bot, session_factory=session_factory, settings=settings),
+            dp.start_polling(
+                bot,
+                session_factory=session_factory,
+                settings=settings,
+                broker=broker,
+                frigate=frigate,
+            ),
             mqtt.run(),
         )
     finally:

@@ -19,25 +19,30 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
+    """Anyone who pressed /start becomes a "known" user (authorized=False).
+    A superuser grants access by flipping ``authorized``."""
+
     __tablename__ = "users"
 
     tg_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    authorized_at: Mapped[datetime] = mapped_column(
+    authorized: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
 
 class Settings(Base):
-    """Global singleton (id == 1).  All authorized users share these."""
+    """Global singleton (id == 1).  All authorized users share these.
+
+    ``mode`` is the global tri-state: "off" / "always" / "schedule"
+    (see :class:`telegram_alert.modes.AlertMode`).
+    """
 
     __tablename__ = "settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    away_mode: Mapped[bool] = mapped_column(Boolean, default=False)
-    # epoch seconds; suppress until this moment regardless of schedule
-    snooze_until: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default="schedule")
 
 
 class ScheduleEntry(Base):

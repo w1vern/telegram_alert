@@ -45,10 +45,16 @@ class TelegramSettings(_Base):
     model_config = _cfg("TG_")
 
     token: SecretStr
-    auth_secret: SecretStr
+    # Comma-separated Telegram user ids with full admin rights. Always
+    # authorized; can grant/revoke access for other users.
+    superusers: str = ""
     # SOCKS5/HTTP proxy used for ALL Telegram traffic, e.g.
     # socks5://user:pass@host:1080 . Telegram is unreachable without it.
     proxy_url: str | None = None
+
+    @property
+    def superuser_ids(self) -> list[int]:
+        return [int(x) for x in self.superusers.replace(" ", "").split(",") if x]
 
 
 class DatabaseSettings(_Base):
@@ -88,6 +94,7 @@ class AmqpSettings(_Base):
 
     host: str
     port: int = 5672
+    tls: bool = False  # use amqps:// (TLS), typically on port 5671
     user: str = "guest"
     password: SecretStr = SecretStr("guest")
     vhost: str = "/"
@@ -101,8 +108,9 @@ class AmqpSettings(_Base):
 
     @property
     def url(self) -> str:
+        scheme = "amqps" if self.tls else "amqp"
         return (
-            f"amqp://{self.user}:{self.password.get_secret_value()}"
+            f"{scheme}://{self.user}:{self.password.get_secret_value()}"
             f"@{self.host}:{self.port}/{self.vhost.lstrip('/')}"
         )
 
@@ -110,12 +118,14 @@ class AmqpSettings(_Base):
 class FrigateSettings(_Base):
     model_config = _cfg("FRIGATE_")
 
-    url: str = "https://frigate.w1vern.space"
+    url: str = "https://frigate.example.com"
     user: str
     password: SecretStr
     # How long to poll for the clip to become available after an event ends.
     clip_timeout: int = 90
-    request_timeout: int = 20
+    request_timeout: int = 30
+    # /clip: length of the fixed clip pulled from each camera's recordings.
+    clip_seconds: int = 12
 
 
 class MinioSettings(_Base):

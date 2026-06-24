@@ -16,6 +16,7 @@ media is already in MinIO regardless.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -53,7 +54,25 @@ class Broker:
         self._main = {RK_JOBS: cfg.jobs_queue, RK_OUTBOX: cfg.outbox_queue}
 
     async def connect(self) -> None:
-        self._conn = await aio_pika.connect_robust(self._cfg.url)
+        backoff = 2.0
+        while True:
+            try:
+                self._conn = await aio_pika.connect_robust(
+                    host=self._cfg.host,
+                    port=self._cfg.port,
+                    login=self._cfg.user,
+                    password=self._cfg.password.get_secret_value(),
+                    virtualhost=self._cfg.vhost,
+                    ssl=self._cfg.tls,
+                    client_properties={"connection_name": "dacha-alert-bot"},
+                )
+                break
+            except Exception as e:  # noqa: BLE001 - retry transient broker outages
+                log.warning(
+                    "AMQP connect failed (%s); retrying in %.0fs", e, backoff
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
         self._pub_channel = await self._conn.channel(publisher_confirms=True)
         self._exchange = await self._pub_channel.declare_exchange(
             self._cfg.exchange, ExchangeType.DIRECT, durable=True

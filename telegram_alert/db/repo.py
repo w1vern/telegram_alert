@@ -18,23 +18,45 @@ from telegram_alert.db.models import (
 # --- users ---------------------------------------------------------------
 
 async def upsert_user(session: AsyncSession, tg_id: int, username: str | None) -> None:
+    """Register a user from /start without changing their authorized flag."""
     stmt = (
         pg_insert(User)
-        .values(tg_id=tg_id, username=username)
-        .on_conflict_do_update(
-            index_elements=[User.tg_id], set_={"username": username}
-        )
+        .values(tg_id=tg_id, username=username, authorized=False)
+        .on_conflict_do_update(index_elements=[User.tg_id], set_={"username": username})
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+
+async def set_authorized(
+    session: AsyncSession, tg_id: int, value: bool, username: str | None = None
+) -> None:
+    """Grant/revoke access; creates the row if the user never pressed /start."""
+    stmt = (
+        pg_insert(User)
+        .values(tg_id=tg_id, username=username, authorized=value)
+        .on_conflict_do_update(index_elements=[User.tg_id], set_={"authorized": value})
     )
     await session.execute(stmt)
     await session.commit()
 
 
 async def is_authorized(session: AsyncSession, tg_id: int) -> bool:
-    return await session.get(User, tg_id) is not None
+    row = await session.get(User, tg_id)
+    return bool(row and row.authorized)
 
 
-async def list_user_ids(session: AsyncSession) -> list[int]:
-    rows = await session.execute(select(User.tg_id))
+async def get_user(session: AsyncSession, tg_id: int) -> User | None:
+    return await session.get(User, tg_id)
+
+
+async def list_users(session: AsyncSession) -> list[User]:
+    rows = await session.execute(select(User).order_by(User.created_at))
+    return list(rows.scalars().all())
+
+
+async def list_authorized_ids(session: AsyncSession) -> list[int]:
+    rows = await session.execute(select(User.tg_id).where(User.authorized.is_(True)))
     return [r[0] for r in rows.all()]
 
 
@@ -43,29 +65,15 @@ async def list_user_ids(session: AsyncSession) -> list[int]:
 async def get_settings_row(session: AsyncSession) -> Settings:
     row = await session.get(Settings, 1)
     if row is None:  # defensive; init_db should have created it
-        row = Settings(id=1)
+        row = Settings(id=1, mode="schedule")
         session.add(row)
         await session.commit()
     return row
 
 
-async def set_notifications_enabled(session: AsyncSession, enabled: bool) -> None:
+async def set_mode(session: AsyncSession, mode: str) -> None:
     await session.execute(
-        update(Settings).where(Settings.id == 1).values(notifications_enabled=enabled)
-    )
-    await session.commit()
-
-
-async def set_away_mode(session: AsyncSession, away: bool) -> None:
-    await session.execute(
-        update(Settings).where(Settings.id == 1).values(away_mode=away)
-    )
-    await session.commit()
-
-
-async def set_snooze_until(session: AsyncSession, until_epoch: int | None) -> None:
-    await session.execute(
-        update(Settings).where(Settings.id == 1).values(snooze_until=until_epoch)
+        update(Settings).where(Settings.id == 1).values(mode=mode)
     )
     await session.commit()
 
@@ -156,9 +164,20 @@ async def was_sent_to(session: AsyncSession, review_id: str, tg_id: int) -> bool
 
 
 async def record_sent(
-    session: AsyncSession, review_id: str, tg_id: int, message_id: int
+    session: AsyncSession,
+    review_id: str,
+    tg_id: int,
+    message_id: int,
+    clip_attached: bool = False,
 ) -> None:
-    session.add(SentMessage(review_id=review_id, tg_id=tg_id, message_id=message_id))
+    session.add(
+        SentMessage(
+            review_id=review_id,
+            tg_id=tg_id,
+            message_id=message_id,
+            clip_attached=clip_attached,
+        )
+    )
     await session.commit()
 
 
