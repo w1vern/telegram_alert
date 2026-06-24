@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, tzinfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def alert_caption(camera: str, ts: float, tz: ZoneInfo) -> str:
+def alert_caption(camera: str, ts: float, tz: tzinfo) -> str:
     when = datetime.fromtimestamp(ts, tz).strftime("%H:%M:%S %d.%m.%Y") if ts else "—"
     return f"🚨 {camera} · человек · {when}"
 
 
-def clip_caption(camera: str, ts: float, tz: ZoneInfo) -> str:
+def clip_caption(camera: str, ts: float, tz: tzinfo) -> str:
     when = datetime.fromtimestamp(ts, tz).strftime("%H:%M:%S %d.%m.%Y") if ts else "—"
     return f"🎥 {camera} · запись · {when}"
 

@@ -8,8 +8,8 @@ composes the groups together.
 
 from __future__ import annotations
 
+from datetime import timedelta, timezone, tzinfo
 from functools import lru_cache
-from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,12 +33,15 @@ class _Base(BaseSettings):
 class AppSettings(_Base):
     model_config = _cfg("APP_")
 
-    tz: str = "Europe/Moscow"
+    # UTC offset (hours) of the place where the cameras are — the dacha local
+    # time. Used to interpret the schedule and to format times in messages.
+    # E.g. Moscow = 3, Magadan = 11. Fractional ok (e.g. 5.5).
+    utc_offset: float = 3
     log_level: str = "INFO"
 
     @property
-    def tzinfo(self) -> ZoneInfo:
-        return ZoneInfo(self.tz)
+    def tzinfo(self) -> tzinfo:
+        return timezone(timedelta(hours=self.utc_offset))
 
 
 class TelegramSettings(_Base):
