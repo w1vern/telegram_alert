@@ -1,0 +1,79 @@
+"""Frigate API client: JWT cookie auth with relogin-on-401, media fetch."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import httpx
+
+from telegram_alert.config import FrigateSettings
+
+log = logging.getLogger(__name__)
+
+
+class ClipNotReady(Exception):
+    """Clip is not available yet (still 404 after the timeout)."""
+
+
+class FrigateClient:
+    def __init__(self, cfg: FrigateSettings) -> None:
+        self._cfg = cfg
+        self._client = httpx.AsyncClient(
+            base_url=cfg.url.rstrip("/"),
+            timeout=cfg.request_timeout,
+            follow_redirects=True,
+        )
+        self._lock = asyncio.Lock()
+        self._logged_in = False
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def _login(self) -> None:
+        async with self._lock:
+            resp = await self._client.post(
+                "/api/login",
+                json={
+                    "user": self._cfg.user,
+                    "password": self._cfg.password.get_secret_value(),
+                },
+            )
+            resp.raise_for_status()
+            # JWT lands in the client's cookie jar automatically.
+            self._logged_in = True
+            log.info("Frigate login ok")
+
+    async def _get(self, path: str) -> httpx.Response:
+        """GET with one transparent relogin on 401."""
+        if not self._logged_in:
+            await self._login()
+        resp = await self._client.get(path)
+        if resp.status_code == 401:
+            log.info("Frigate 401, re-logging in")
+            self._logged_in = False
+            await self._login()
+            resp = await self._client.get(path)
+        return resp
+
+    async def get_snapshot(self, event_id: str) -> bytes:
+        resp = await self._get(f"/api/events/{event_id}/snapshot.jpg")
+        resp.raise_for_status()
+        return resp.content
+
+    async def get_clip(self, event_id: str) -> bytes:
+        """Poll for the clip until it is ready or the timeout elapses."""
+        deadline = asyncio.get_event_loop().time() + self._cfg.clip_timeout
+        delay = 2.0
+        last_status = None
+        while True:
+            resp = await self._get(f"/api/events/{event_id}/clip.mp4")
+            if resp.status_code == 200:
+                return resp.content
+            last_status = resp.status_code
+            if asyncio.get_event_loop().time() >= deadline:
+                raise ClipNotReady(
+                    f"clip {event_id} not ready (last status {last_status})"
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 10.0)
