@@ -44,16 +44,16 @@ class FrigateClient:
             self._logged_in = True
             log.info("Frigate login ok")
 
-    async def _get(self, path: str) -> httpx.Response:
+    async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
         """GET with one transparent relogin on 401."""
         if not self._logged_in:
             await self._login()
-        resp = await self._client.get(path)
+        resp = await self._client.get(path, params=params)
         if resp.status_code == 401:
             log.info("Frigate 401, re-logging in")
             self._logged_in = False
             await self._login()
-            resp = await self._client.get(path)
+            resp = await self._client.get(path, params=params)
         return resp
 
     async def list_cameras(self) -> list[str]:
@@ -62,9 +62,20 @@ class FrigateClient:
         cfg = resp.json()
         return list((cfg.get("cameras") or {}).keys())
 
+    def _snapshot_params(self, height_key: str) -> dict[str, int]:
+        """Quality/height overrides for the snapshot endpoints.  ``latest.jpg``
+        names the height param ``h``; ``events/.../snapshot.jpg`` names it
+        ``height`` — hence the key argument.  A 0 value means 'omit'."""
+        params: dict[str, int] = {}
+        if self._cfg.snapshot_quality:
+            params["quality"] = self._cfg.snapshot_quality
+        if self._cfg.snapshot_height:
+            params[height_key] = self._cfg.snapshot_height
+        return params
+
     async def get_camera_snapshot(self, camera: str) -> bytes:
         """Current frame from the camera (independent of any event)."""
-        resp = await self._get(f"/api/{camera}/latest.jpg")
+        resp = await self._get(f"/api/{camera}/latest.jpg", self._snapshot_params("h"))
         resp.raise_for_status()
         return resp.content
 
@@ -90,7 +101,9 @@ class FrigateClient:
             delay = min(delay * 1.5, 8.0)
 
     async def get_snapshot(self, event_id: str) -> bytes:
-        resp = await self._get(f"/api/events/{event_id}/snapshot.jpg")
+        resp = await self._get(
+            f"/api/events/{event_id}/snapshot.jpg", self._snapshot_params("height")
+        )
         resp.raise_for_status()
         return resp.content
 

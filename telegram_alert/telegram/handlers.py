@@ -84,7 +84,7 @@ def _day_text(weekday: int, windows: list[Window]) -> str:
 
 
 def _mode_text(mode: AlertMode) -> str:
-    lines = ["Режим алертов (глобально для всех):", ""]
+    lines = ["Режим алертов:", ""]
     for m in (AlertMode.OFF, AlertMode.ALWAYS, AlertMode.SCHEDULE):
         prefix = "▶️" if m == mode else "▫️"
         lines.append(f"{prefix} {MODE_LABELS[m]} — {MODE_HINTS[m]}")
@@ -324,7 +324,7 @@ async def cmd_clip(
     capped = " (макс)" if requested > MAX_CLIP_SECONDS else ""
     await message.answer(
         f"🎥 Беру {seconds}-сек{capped} запись с камер: "
-        f"<b>{', '.join(cameras)}</b> — разошлю всем авторизованным."
+        f"<b>{', '.join(cameras)}</b> — пришлю сюда."
     )
 
 

@@ -125,6 +125,14 @@ class FrigateSettings(_Base):
     # How long to poll for the clip to become available after an event ends.
     clip_timeout: int = 90
     request_timeout: int = 30
+    # Snapshot rendering overrides passed to Frigate's snapshot API. Frigate only
+    # decodes the DETECT stream, so this is the hard ceiling — for sharper images
+    # raise the detect stream resolution in Frigate. These just stop the API from
+    # down-scaling/recompressing: a stored event snapshot defaults to height=175,
+    # quality=60, which looks bad in Telegram. ``height`` is capped at the detect
+    # stream's native height (no real upscaling). 0 = don't send the param.
+    snapshot_quality: int = 95  # JPEG quality 1..100
+    snapshot_height: int = 1080  # px
 
 
 class MinioSettings(_Base):
