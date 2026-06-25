@@ -18,41 +18,6 @@ _MODE_ACTION = {
 }
 
 
-def approval_keyboard(uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Авторизовать", callback_data=Cb(a="grant", uid=uid).pack()),
-                InlineKeyboardButton(text="🚫 Отклонить", callback_data=Cb(a="deny", uid=uid).pack()),
-            ]
-        ]
-    )
-
-
-def users_keyboard(users, su_ids: set[int]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for u in users:
-        if u.tg_id in su_ids:
-            name = f"@{u.username}" if u.username else str(u.tg_id)
-            rows.append(
-                [InlineKeyboardButton(text=f"👑 {name} ({u.tg_id})", callback_data=Cb(a="su").pack())]
-            )
-            continue
-        mark = "✅" if u.authorized else "🚫"
-        name = f"@{u.username}" if u.username else str(u.tg_id)
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{mark} {name} ({u.tg_id})",
-                    callback_data=Cb(a="utoggle", uid=u.tg_id).pack(),
-                )
-            ]
-        )
-    if not rows:
-        rows.append([InlineKeyboardButton(text="— нет известных пользователей —", callback_data=Cb(a="uinfo").pack())])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 def mode_keyboard(current: AlertMode) -> InlineKeyboardMarkup:
     rows = []
     for mode in (AlertMode.OFF, AlertMode.ALWAYS, AlertMode.SCHEDULE):

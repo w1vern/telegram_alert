@@ -48,16 +48,14 @@ class TelegramSettings(_Base):
     model_config = _cfg("TG_")
 
     token: SecretStr
-    # Comma-separated Telegram user ids with full admin rights. Always
-    # authorized; can grant/revoke access for other users.
-    superusers: str = ""
+    # The single Telegram group the bot is bound to: it posts all alerts there
+    # and only accepts commands coming from this chat. Group membership is the
+    # trust boundary — there is no per-user authorization. Supergroup ids are
+    # negative (e.g. -1001234567890).
+    chat_id: int
     # SOCKS5/HTTP proxy used for ALL Telegram traffic, e.g.
     # socks5://user:pass@host:1080 . Telegram is unreachable without it.
     proxy_url: str | None = None
-
-    @property
-    def superuser_ids(self) -> list[int]:
-        return [int(x) for x in self.superusers.replace(" ", "").split(",") if x]
 
 
 class DatabaseSettings(_Base):

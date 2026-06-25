@@ -1,13 +1,14 @@
 """Outbox stage: the only proxy-dependent consumer.
 
 Pulls ``outbox`` jobs and performs the actual Telegram I/O.  Media is already in
-MinIO, so this stage just fetches bytes / presigns links and sends.  Network /
-proxy failures are re-raised so the broker reschedules a delayed retry; the job
-keeps waiting until the proxy is alive again.  Permanent per-user errors (user
-blocked the bot, message gone) are skipped so they don't poison the job.
+MinIO, so this stage just fetches bytes / presigns links and posts a single
+message to the bound group.  Network / proxy failures are re-raised so the
+broker reschedules a delayed retry; the job keeps waiting until the proxy is
+alive again.  Permanent errors (chat gone, bot removed) are skipped so they
+don't poison the job.
 
-Fan-out is idempotent via the ``sent_messages`` table: a retried job won't
-re-send to users who already got the photo.
+Sends are idempotent via the ``sent_messages`` table: a retried job won't repost
+a review that was already delivered.
 """
 
 from __future__ import annotations
@@ -66,14 +67,13 @@ class OutboxSender:
             # MinIO video. Only the caption text differs.
             await self._send_photo(job)
 
-    async def _recipients(self) -> list[int]:
-        async with self._sf() as session:
-            ids = await repo.list_authorized_ids(session)
-        # Superusers always receive alerts, even if they never pressed /start.
-        return list(dict.fromkeys([*ids, *self._s.telegram.superuser_ids]))
-
     async def _send_photo(self, job: OutboxJob) -> None:
         assert job.snap_key
+        # Idempotency: a retried job must not repost a review already delivered.
+        async with self._sf() as session:
+            if await repo.get_sent(session, job.review_id) is not None:
+                return
+
         data = await self._storage.get(job.snap_key)
         tz = self._s.app.tzinfo
         if job.action == "clip":
@@ -88,41 +88,39 @@ class OutboxSender:
             url = await self._storage.presigned_get(job.clip_key)
             kb = clip_keyboard(url)
 
-        for uid in await self._recipients():
-            async with self._sf() as session:
-                if await repo.was_sent_to(session, job.review_id, uid):
-                    continue
-            photo = BufferedInputFile(data, filename="snap.jpg")
-            try:
-                msg = await self._bot.send_photo(uid, photo, caption=caption, reply_markup=kb)
-            except _PERMANENT as e:
-                log.warning("photo to %s skipped permanently: %s", uid, e)
-                continue
-            # Any other error (network/proxy/5xx) propagates -> delayed retry.
-            async with self._sf() as session:
-                await repo.record_sent(
-                    session, job.review_id, uid, msg.message_id, clip_attached=bool(job.clip_key)
-                )
+        chat_id = self._s.telegram.chat_id
+        photo = BufferedInputFile(data, filename="snap.jpg")
+        try:
+            msg = await self._bot.send_photo(chat_id, photo, caption=caption, reply_markup=kb)
+        except _PERMANENT as e:
+            log.warning("photo for review %s skipped permanently: %s", job.review_id, e)
+            return
+        # Any other error (network/proxy/5xx) propagates -> delayed retry.
+        async with self._sf() as session:
+            await repo.record_sent(
+                session, job.review_id, msg.message_id, clip_attached=bool(job.clip_key)
+            )
 
     async def _attach_clip(self, job: OutboxJob) -> None:
+        async with self._sf() as session:
+            sent = await repo.get_sent(session, job.review_id)
+        if sent is None or sent.clip_attached:
+            return
+
         if job.clip_key:
             url = await self._storage.presigned_get(job.clip_key)
             kb = clip_keyboard(url)
         else:
             kb = clip_unavailable_keyboard()
 
+        try:
+            await self._bot.edit_message_reply_markup(
+                chat_id=self._s.telegram.chat_id,
+                message_id=sent.message_id,
+                reply_markup=kb,
+            )
+        except _PERMANENT as e:
+            log.warning("attach_clip for review %s skipped: %s", job.review_id, e)
+        # network errors propagate -> retry the job
         async with self._sf() as session:
-            sent = await repo.get_sent(session, job.review_id)
-
-        for s in sent:
-            if s.clip_attached:
-                continue
-            try:
-                await self._bot.edit_message_reply_markup(
-                    chat_id=s.tg_id, message_id=s.message_id, reply_markup=kb
-                )
-            except _PERMANENT as e:
-                log.warning("attach_clip to %s/%s skipped: %s", s.tg_id, s.message_id, e)
-            # network errors propagate -> retry the job
-            async with self._sf() as session:
-                await repo.mark_clip_attached(session, s.id)
+            await repo.mark_clip_attached(session, job.review_id)

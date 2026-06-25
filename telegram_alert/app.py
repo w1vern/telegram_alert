@@ -8,7 +8,6 @@ import logging
 from telegram_alert.broker.amqp import Broker
 from telegram_alert.broker.worker import MediaWorker
 from telegram_alert.config import get_settings
-from telegram_alert.db import repo
 from telegram_alert.db.engine import init_db, make_engine, make_sessionmaker
 from telegram_alert.logging_conf import setup_logging
 from telegram_alert.mqtt.consumer import MqttIngress
@@ -53,9 +52,7 @@ async def main() -> None:
     me = await bot.get_me()
     log.info("Telegram bot @%s id=%s; ensuring polling mode", me.username, me.id)
     await bot.delete_webhook(drop_pending_updates=False)
-    async with session_factory() as session:
-        authorized_ids = await repo.list_authorized_ids(session)
-    await setup_commands(bot, settings.telegram.superuser_ids, authorized_ids)
+    await setup_commands(bot, settings.telegram.chat_id)
 
     try:
         await asyncio.gather(

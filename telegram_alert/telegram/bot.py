@@ -19,7 +19,7 @@ from aiogram.types import TelegramObject, Update
 
 from telegram_alert.config import TelegramSettings
 from telegram_alert.telegram.handlers import router
-from telegram_alert.telegram.middleware import AuthMiddleware
+from telegram_alert.telegram.middleware import ChatFilterMiddleware
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def build_bot(cfg: TelegramSettings) -> Bot:
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.outer_middleware(UpdateLogMiddleware())
-    dp.message.middleware(AuthMiddleware())
-    dp.callback_query.middleware(AuthMiddleware())
+    dp.message.middleware(ChatFilterMiddleware())
+    dp.callback_query.middleware(ChatFilterMiddleware())
     dp.include_router(router)
     return dp

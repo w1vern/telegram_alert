@@ -11,7 +11,6 @@ import time
 from datetime import datetime
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,13 +39,10 @@ from telegram_alert.services.schedule import (
     windows_for_day,
 )
 from telegram_alert.telegram.callbacks import Cb
-from telegram_alert.telegram.commands import apply_user_commands
 from telegram_alert.telegram.keyboards import (
     WEEKDAYS,
-    approval_keyboard,
     day_keyboard,
     mode_keyboard,
-    users_keyboard,
     week_keyboard,
 )
 
@@ -56,10 +52,6 @@ router = Router()
 
 class SchedFSM(StatesGroup):
     waiting_interval = State()
-
-
-def _is_superuser(settings: Settings, uid: int) -> bool:
-    return uid in settings.telegram.superuser_ids
 
 
 # --- helpers -------------------------------------------------------------
@@ -99,48 +91,16 @@ def _mode_text(mode: AlertMode) -> str:
     return "\n".join(lines)
 
 
-# --- public (no auth) ----------------------------------------------------
+# --- start / help --------------------------------------------------------
 
 @router.message(Command("start"))
-async def cmd_start(
-    message: Message,
-    session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-) -> None:
-    uid = message.from_user.id
-    username = message.from_user.username
-    async with session_factory() as session:
-        await repo.upsert_user(session, uid, username)
-        authorized = await repo.is_authorized(session, uid)
-
-    superuser = _is_superuser(settings, uid)
-    # Make the command menu match the user's current rights right away.
-    await apply_user_commands(message.bot, uid, authorized=authorized, superuser=superuser)
-
-    if authorized or superuser:
-        await message.answer("👋 Привет! Бот активен. /help — список команд.")
-        return
-
-    await message.answer(
-        "👋 Это алерт-бот дачи.\n"
-        "Заявка на доступ отправлена администратору — ожидай подтверждения."
-    )
-    # Ping every superuser with an approve/deny inline keyboard.
-    handle = f"@{username}" if username else "—"
-    for su in settings.telegram.superuser_ids:
-        try:
-            await message.bot.send_message(
-                su,
-                f"🆕 Запрос доступа: {handle} (<code>{uid}</code>)",
-                reply_markup=approval_keyboard(uid),
-            )
-        except Exception:  # noqa: BLE001 - superuser may not have opened the bot
-            log.warning("could not notify superuser %s about new user %s", su, uid)
+async def cmd_start(message: Message) -> None:
+    await message.answer("👋 Алерт-бот дачи активен. /help — список команд.")
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message, settings: Settings) -> None:
-    base = (
+async def cmd_help(message: Message) -> None:
+    await message.answer(
         "Команды:\n"
         "/status — текущее состояние\n"
         "/mode — режим алертов: отключены / всегда / по расписанию\n"
@@ -151,153 +111,6 @@ async def cmd_help(message: Message, settings: Settings) -> None:
         "/unmute &lt;часы&gt; — включить на N часов, напр. <code>/unmute 3</code>\n"
         "/auto — сбросить override, вернуться к расписанию"
     )
-    if _is_superuser(settings, message.from_user.id):
-        base += (
-            "\n\nАдмин:\n"
-            "/users — список пользователей, выдать/забрать доступ\n"
-            "/grant &lt;id&gt; — выдать доступ по ID\n"
-            "/revoke &lt;id&gt; — забрать доступ по ID"
-        )
-    await message.answer(base)
-
-
-# --- admin: authorization management ------------------------------------
-
-@router.message(Command("users"))
-async def cmd_users(
-    message: Message,
-    session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-) -> None:
-    if not _is_superuser(settings, message.from_user.id):
-        await message.answer("⛔ Только для администратора.")
-        return
-    async with session_factory() as session:
-        users = await repo.list_users(session)
-    su = set(settings.telegram.superuser_ids)
-    await message.answer(
-        "👥 Пользователи (нажми, чтобы выдать/забрать доступ):",
-        reply_markup=users_keyboard(users, su),
-    )
-
-
-@router.message(Command("grant"))
-async def cmd_grant(
-    message: Message,
-    command: CommandObject,
-    session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-) -> None:
-    await _grant_revoke_cmd(message, command, session_factory, settings, value=True)
-
-
-@router.message(Command("revoke"))
-async def cmd_revoke(
-    message: Message,
-    command: CommandObject,
-    session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-) -> None:
-    await _grant_revoke_cmd(message, command, session_factory, settings, value=False)
-
-
-async def _grant_revoke_cmd(message, command, session_factory, settings, value: bool) -> None:
-    if not _is_superuser(settings, message.from_user.id):
-        await message.answer("⛔ Только для администратора.")
-        return
-    arg = (command.args or "").strip()
-    if not arg.lstrip("-").isdigit():
-        await message.answer("Формат: <code>/grant 123456789</code>")
-        return
-    target = int(arg)
-    async with session_factory() as session:
-        await repo.set_authorized(session, target, value)
-    await apply_user_commands(
-        message.bot, target, authorized=value, superuser=_is_superuser(settings, target)
-    )
-    word = "выдан" if value else "забран"
-    await message.answer(f"✅ Доступ {word} для <code>{target}</code>.")
-    if value:
-        try:
-            await message.bot.send_message(target, "✅ Тебе выдан доступ к алертам дачи.")
-        except Exception:  # noqa: BLE001
-            pass
-
-
-@router.callback_query(Cb.filter(F.a == "grant"))
-async def cb_grant(query: CallbackQuery, callback_data: Cb, session_factory, settings: Settings) -> None:
-    if not _is_superuser(settings, query.from_user.id):
-        await query.answer("⛔ Только для администратора.", show_alert=True)
-        return
-    async with session_factory() as session:
-        await repo.set_authorized(session, callback_data.uid, True)
-    await apply_user_commands(
-        query.bot,
-        callback_data.uid,
-        authorized=True,
-        superuser=_is_superuser(settings, callback_data.uid),
-    )
-    await query.message.edit_text(f"✅ Авторизован <code>{callback_data.uid}</code>")
-    try:
-        await query.bot.send_message(callback_data.uid, "✅ Тебе выдан доступ к алертам дачи.")
-    except Exception:  # noqa: BLE001
-        pass
-    await query.answer("Готово")
-
-
-@router.callback_query(Cb.filter(F.a == "deny"))
-async def cb_deny(query: CallbackQuery, callback_data: Cb, settings: Settings) -> None:
-    if not _is_superuser(settings, query.from_user.id):
-        await query.answer("⛔ Только для администратора.", show_alert=True)
-        return
-    await query.message.edit_text(f"🚫 Отклонён <code>{callback_data.uid}</code>")
-    await query.answer()
-
-
-@router.callback_query(Cb.filter(F.a == "utoggle"))
-async def cb_utoggle(query: CallbackQuery, callback_data: Cb, session_factory, settings: Settings) -> None:
-    if not _is_superuser(settings, query.from_user.id):
-        await query.answer("⛔ Только для администратора.", show_alert=True)
-        return
-    su = set(settings.telegram.superuser_ids)
-    if callback_data.uid in su:
-        await query.answer("👑 Это суперадмин — права не меняются.", show_alert=True)
-        return
-
-    # Separate sessions: set_authorized is a Core UPDATE, so reusing the session
-    # that already loaded the User would re-read the stale identity-mapped object
-    # and rebuild an identical keyboard (-> "message is not modified" crash).
-    async with session_factory() as session:
-        user = await repo.get_user(session, callback_data.uid)
-        new_value = not (user.authorized if user else False)
-    async with session_factory() as session:
-        await repo.set_authorized(session, callback_data.uid, new_value)
-    async with session_factory() as session:
-        users = await repo.list_users(session)
-
-    await apply_user_commands(
-        query.bot, callback_data.uid, authorized=new_value, superuser=False
-    )
-    try:
-        await query.message.edit_reply_markup(reply_markup=users_keyboard(users, su))
-    except TelegramBadRequest:
-        pass  # markup unchanged (shouldn't happen now, but stay safe)
-    if new_value:
-        try:
-            await query.bot.send_message(callback_data.uid, "✅ Тебе выдан доступ к алертам дачи.")
-        except Exception:  # noqa: BLE001
-            pass
-    await query.answer("Доступ выдан" if new_value else "Доступ забран")
-
-
-@router.callback_query(Cb.filter(F.a == "su"))
-async def cb_su(query: CallbackQuery) -> None:
-    await query.answer("👑 Суперадмин — доступ всегда, права не меняются.")
-
-
-@router.callback_query(Cb.filter(F.a == "uinfo"))
-async def cb_uinfo(query: CallbackQuery) -> None:
-    await query.answer()
 
 
 # --- /status -------------------------------------------------------------
