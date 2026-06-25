@@ -146,7 +146,7 @@ class Broker:
             try:
                 payload = json.loads(message.body)
                 await handler(payload, attempt)
-            except Exception:  # noqa: BLE001 - one bad message must not kill the loop
+            except Exception as e:  # noqa: BLE001 - one bad message must not kill the loop
                 next_attempt = attempt + 1
                 if next_attempt >= MAX_ATTEMPTS:
                     log.exception(
@@ -156,11 +156,15 @@ class Broker:
                     )
                     await message.ack()
                     return
+                # A raise is the *designed* signal to retry (e.g. upstream briefly
+                # down), so this is expected control flow, not a crash: log one
+                # concise line, not a full traceback per attempt.
                 log.warning(
-                    "%s handler failed (attempt %d), scheduling retry",
+                    "%s handler failed (attempt %d), scheduling retry: %s: %s",
                     stage,
                     attempt,
-                    exc_info=True,
+                    type(e).__name__,
+                    e,
                 )
                 await self._publish_retry(stage, message.body, next_attempt)
                 await message.ack()  # original handed off to the retry queue

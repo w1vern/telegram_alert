@@ -11,9 +11,15 @@ from telegram_alert.config import FrigateSettings
 
 log = logging.getLogger(__name__)
 
+# Brief in-line retries for single-shot fetches (snapshots) on a transport blip
+# — typically Frigate restarting and dropping the connection mid-stream.
+_SNAPSHOT_ATTEMPTS = 3
+_RETRY_SLEEP = 2.0
+
 
 class ClipNotReady(Exception):
-    """Clip is not available yet (still 404 after the timeout)."""
+    """Clip is not available within the timeout — still 404, or the connection
+    kept dropping (e.g. Frigate restarting)."""
 
 
 class FrigateClient:
@@ -56,6 +62,34 @@ class FrigateClient:
             resp = await self._client.get(path, params=params)
         return resp
 
+    async def _fetch_bytes(self, path: str, params: dict | None = None) -> bytes:
+        """GET expecting a 200 body, with brief retries on transport errors.
+
+        A transport error (``httpx.RequestError`` — e.g. ``RemoteProtocolError``
+        when Frigate drops the connection mid-stream during a restart) is
+        transient: the pooled keep-alive connection is stale, so we force a
+        relogin (fresh connection) and retry a few times.  An HTTP *status*
+        error (``raise_for_status``) is not transient and propagates — the
+        broker will then schedule a durable retry of the whole job.
+        """
+        last: httpx.RequestError | None = None
+        for attempt in range(_SNAPSHOT_ATTEMPTS):
+            try:
+                resp = await self._get(path, params)
+                resp.raise_for_status()
+                return resp.content
+            except httpx.RequestError as e:
+                last = e
+                self._logged_in = False  # drop the stale connection on next try
+                log.warning(
+                    "Frigate GET %s transport error (%s), retry %d/%d",
+                    path, e, attempt + 1, _SNAPSHOT_ATTEMPTS,
+                )
+                if attempt + 1 < _SNAPSHOT_ATTEMPTS:
+                    await asyncio.sleep(_RETRY_SLEEP)
+        assert last is not None
+        raise last
+
     async def list_cameras(self) -> list[str]:
         resp = await self._get("/api/config")
         resp.raise_for_status()
@@ -75,9 +109,33 @@ class FrigateClient:
 
     async def get_camera_snapshot(self, camera: str) -> bytes:
         """Current frame from the camera (independent of any event)."""
-        resp = await self._get(f"/api/{camera}/latest.jpg", self._snapshot_params("h"))
-        resp.raise_for_status()
-        return resp.content
+        return await self._fetch_bytes(f"/api/{camera}/latest.jpg", self._snapshot_params("h"))
+
+    async def _poll_clip(self, path: str, what: str, max_delay: float) -> bytes:
+        """Poll an on-demand mp4 until it is ready or the timeout elapses.
+
+        Both a not-ready status (404) and a transport error (Frigate restarting
+        and dropping the stream) are transient: keep polling within the deadline.
+        Only when the whole timeout elapses do we give up with ``ClipNotReady`` —
+        which callers treat as 'clip unavailable' (best-effort), so a flapping
+        Frigate degrades gracefully instead of escalating into a retry storm.
+        """
+        deadline = asyncio.get_event_loop().time() + self._cfg.clip_timeout
+        delay = 2.0
+        last = "?"
+        while True:
+            try:
+                resp = await self._get(path)
+                if resp.status_code == 200 and resp.content:
+                    return resp.content
+                last = f"status {resp.status_code}"
+            except httpx.RequestError as e:
+                self._logged_in = False  # stale connection after a restart
+                last = f"transport error ({e})"
+            if asyncio.get_event_loop().time() >= deadline:
+                raise ClipNotReady(f"{what} not ready (last: {last})")
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, max_delay)
 
     async def get_recording_clip(self, camera: str, start: float, end: float) -> bytes:
         """Fixed-length clip cut from continuous recordings [start, end].
@@ -85,41 +143,15 @@ class FrigateClient:
         Frigate generates the mp4 on demand, so retry briefly until it's ready.
         """
         path = f"/api/{camera}/start/{start:.3f}/end/{end:.3f}/clip.mp4"
-        deadline = asyncio.get_event_loop().time() + self._cfg.clip_timeout
-        delay = 2.0
-        last_status = None
-        while True:
-            resp = await self._get(path)
-            if resp.status_code == 200 and resp.content:
-                return resp.content
-            last_status = resp.status_code
-            if asyncio.get_event_loop().time() >= deadline:
-                raise ClipNotReady(
-                    f"recording clip for {camera} not ready (last status {last_status})"
-                )
-            await asyncio.sleep(delay)
-            delay = min(delay * 1.5, 8.0)
+        return await self._poll_clip(path, f"recording clip for {camera}", max_delay=8.0)
 
     async def get_snapshot(self, event_id: str) -> bytes:
-        resp = await self._get(
+        return await self._fetch_bytes(
             f"/api/events/{event_id}/snapshot.jpg", self._snapshot_params("height")
         )
-        resp.raise_for_status()
-        return resp.content
 
     async def get_clip(self, event_id: str) -> bytes:
-        """Poll for the clip until it is ready or the timeout elapses."""
-        deadline = asyncio.get_event_loop().time() + self._cfg.clip_timeout
-        delay = 2.0
-        last_status = None
-        while True:
-            resp = await self._get(f"/api/events/{event_id}/clip.mp4")
-            if resp.status_code == 200:
-                return resp.content
-            last_status = resp.status_code
-            if asyncio.get_event_loop().time() >= deadline:
-                raise ClipNotReady(
-                    f"clip {event_id} not ready (last status {last_status})"
-                )
-            await asyncio.sleep(delay)
-            delay = min(delay * 1.5, 10.0)
+        """Poll for the event clip until it is ready or the timeout elapses."""
+        return await self._poll_clip(
+            f"/api/events/{event_id}/clip.mp4", f"clip {event_id}", max_delay=10.0
+        )

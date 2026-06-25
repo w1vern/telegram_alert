@@ -122,8 +122,12 @@ class FrigateSettings(_Base):
     url: str = "https://frigate.example.com"
     user: str
     password: SecretStr
-    # How long to poll for the clip to become available after an event ends.
-    clip_timeout: int = 90
+    # How long (seconds) to keep polling for the clip after an event ends —
+    # covers both "not generated yet" and a Frigate restart dropping the stream.
+    # Within this window the bot keeps trying and still attaches the real clip if
+    # Frigate recovers; only after it elapses does the clip become best-effort
+    # "unavailable" (no exception escapes — see FrigateClient._poll_clip).
+    clip_timeout: int = 120
     request_timeout: int = 30
     # Snapshot rendering overrides passed to Frigate's snapshot API. Frigate only
     # decodes the DETECT stream, so this is the hard ceiling — for sharper images
