@@ -134,15 +134,41 @@ cp .env.example .env   # заполнить токены/хосты/прокси
 docker compose up -d --build
 ```
 
-В compose поднимаются **бот + Postgres**. RabbitMQ, MinIO и Frigate — внешние,
-бот ходит к ним исходящими соединениями; Telegram — через `TG_PROXY_URL`.
+В compose поднимаются **бот + Postgres + миграции**. RabbitMQ, MinIO и Frigate —
+внешние, бот ходит к ним исходящими соединениями; Telegram — через `TG_PROXY_URL`.
 
-Локально без Docker:
+Локально без Docker (схему предварительно накатить через `make migration`):
 
 ```bash
 uv sync
 uv run python -m telegram_alert
 ```
+
+### Миграции (Alembic)
+
+Схема БД управляется **Alembic**. Миграции вынесены в отдельный one-shot сервис
+`migrate` в [compose.yml](compose.yml): он прогоняет `alembic upgrade head` и
+завершается, а `bot` стартует только после его успешного завершения
+(`depends_on … service_completed_successfully`). Сам бот схему не трогает —
+только досоздаёт singleton-настройку. DSN берётся из настроек приложения
+(`.env`), отдельной строки подключения в `alembic.ini` нет.
+
+Конфигурация и ревизии лежат в пакете: [telegram_alert/migrations/](telegram_alert/migrations/).
+
+Команды — в [Makefile](Makefile), все идут через docker compose, поэтому Postgres
+поднимается автоматически и хост `postgres` резолвится внутри сети compose
+(отдельно поднимать БД и подменять `DB_HOST` не нужно):
+
+```bash
+make migration                    # alembic upgrade head (накатить всё)
+make gen_migration m="add field"  # автогенерация миграции по моделям
+make down_migration               # откатить одну миграцию
+```
+
+`make gen_migration` пишет новый файл в
+[telegram_alert/migrations/versions/](telegram_alert/migrations/versions/)
+(каталог примонтирован в сервис `migrate`), так что ревизия сразу появляется на
+хосте.
 
 ## Предварительные шаги вне сервиса
 

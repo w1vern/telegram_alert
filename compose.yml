@@ -14,6 +14,17 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build: .
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      ["uv", "run", "--no-dev", "alembic",
+       "-c", "telegram_alert/migrations/alembic.ini", "upgrade", "head"]
+    restart: "no"
+
   bot:
     build: .
     restart: unless-stopped
@@ -21,10 +32,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
   pgdata:
-
-

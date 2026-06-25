@@ -28,7 +28,7 @@ async def main() -> None:
 
     engine = make_engine(settings.db.dsn)
     session_factory = make_sessionmaker(engine)
-    await init_db(engine, session_factory)
+    await init_db(session_factory)
 
     storage = MinioStorage(settings.minio)
     await storage.ensure_bucket()
