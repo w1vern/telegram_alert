@@ -127,8 +127,6 @@ class FrigateSettings(_Base):
     # How long to poll for the clip to become available after an event ends.
     clip_timeout: int = 90
     request_timeout: int = 30
-    # /clip: length of the fixed clip pulled from each camera's recordings.
-    clip_seconds: int = 12
 
 
 class MinioSettings(_Base):

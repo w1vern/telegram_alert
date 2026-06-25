@@ -15,13 +15,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    BotCommand,
-    BotCommandScopeChat,
-    BotCommandScopeDefault,
-    TelegramObject,
-    Update,
-)
+from aiogram.types import TelegramObject, Update
 
 from telegram_alert.config import TelegramSettings
 from telegram_alert.telegram.handlers import router
@@ -69,33 +63,3 @@ def build_dispatcher() -> Dispatcher:
     dp.callback_query.middleware(AuthMiddleware())
     dp.include_router(router)
     return dp
-
-
-# Shown in the Telegram "menu" button (default scope, everyone).
-BASE_COMMANDS = [
-    BotCommand(command="start", description="Начало работы"),
-    BotCommand(command="status", description="Текущее состояние"),
-    BotCommand(command="mode", description="Режим алертов"),
-    BotCommand(command="schedule", description="Окна присутствия"),
-    BotCommand(command="clip", description="Запись последних действий со всех камер"),
-    BotCommand(command="mute", description="Временно заглушить (по расписанию)"),
-    BotCommand(command="unmute", description="Временно включить (по расписанию)"),
-    BotCommand(command="auto", description="Сбросить override, вернуть расписание"),
-    BotCommand(command="help", description="Список команд"),
-]
-
-# Extra commands shown only to superusers.
-ADMIN_COMMANDS = BASE_COMMANDS + [
-    BotCommand(command="users", description="Пользователи и доступ"),
-    BotCommand(command="grant", description="Выдать доступ по ID"),
-    BotCommand(command="revoke", description="Забрать доступ по ID"),
-]
-
-
-async def setup_commands(bot: Bot, superuser_ids: list[int]) -> None:
-    await bot.set_my_commands(BASE_COMMANDS, scope=BotCommandScopeDefault())
-    for uid in superuser_ids:
-        try:
-            await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=uid))
-        except Exception:  # noqa: BLE001 - superuser may not have started the bot yet
-            log.warning("could not set admin commands for %s", uid)

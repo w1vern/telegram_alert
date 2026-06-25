@@ -17,7 +17,7 @@ from telegram_alert.broker.amqp import Broker
 from telegram_alert.broker.jobs import MediaJob, OutboxJob
 from telegram_alert.config import Settings
 from telegram_alert.db import repo
-from telegram_alert.modes import parse_mode, parse_override
+from telegram_alert.modes import parse_mode, resolve_override
 from telegram_alert.services.frigate import ClipNotReady, FrigateClient
 from telegram_alert.services.schedule import Window, should_notify
 from telegram_alert.services.storage import MinioStorage
@@ -72,7 +72,9 @@ class MediaWorker:
         clip_available = True
         if not await self._storage.exists(clip_key):
             end = time.time() - 2
-            start = end - (job.clip_seconds or self._s.frigate.clip_seconds)
+            # /clip always carries an explicit length (no default).
+            assert job.clip_seconds is not None
+            start = end - job.clip_seconds
             try:
                 data = await self._frigate.get_recording_clip(job.camera, start, end)
             except ClipNotReady:
@@ -158,6 +160,5 @@ class MediaWorker:
             row = await repo.get_settings_row(session)
             entries = await repo.list_schedule(session)
         windows = [Window(e.weekday, e.start_min, e.end_min) for e in entries]
-        return should_notify(
-            now, parse_mode(row.mode), windows, parse_override(row.override)
-        )
+        override = resolve_override(row.override, row.override_until, now.timestamp())
+        return should_notify(now, parse_mode(row.mode), windows, override)

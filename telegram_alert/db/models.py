@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -46,6 +46,9 @@ class Settings(Base):
     # Temporary manual deviation in SCHEDULE mode: "none" / "mute" / "unmute"
     # (see :class:`telegram_alert.modes.ScheduleOverride`). Cleared on mode change.
     override: Mapped[str] = mapped_column(String(16), default="none", server_default="none")
+    # Epoch seconds when the override expires (mute/unmute are always temporary).
+    # NULL when there is no active override.
+    override_until: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ScheduleEntry(Base):

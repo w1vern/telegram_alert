@@ -39,10 +39,14 @@ class AuthMiddleware(BaseMiddleware):
             authorized = await repo.is_authorized(session, user.id)
 
         if not authorized:
+            msg = (
+                "⛔ Нет доступа к этой команде.\n"
+                "Отправь /start, чтобы запросить доступ у администратора."
+            )
             if isinstance(event, Message):
-                await event.answer("⛔ Не авторизован. Используй /start <секрет>.")
+                await event.answer(msg)
             elif isinstance(event, CallbackQuery):
-                await event.answer("⛔ Не авторизован.", show_alert=True)
+                await event.answer("⛔ Нет доступа.", show_alert=True)
             return None
 
         return await handler(event, data)

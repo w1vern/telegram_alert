@@ -35,7 +35,7 @@ def users_keyboard(users, su_ids: set[int]) -> InlineKeyboardMarkup:
         if u.tg_id in su_ids:
             name = f"@{u.username}" if u.username else str(u.tg_id)
             rows.append(
-                [InlineKeyboardButton(text=f"👑 {name} ({u.tg_id})", callback_data=Cb(a="noop").pack())]
+                [InlineKeyboardButton(text=f"👑 {name} ({u.tg_id})", callback_data=Cb(a="su").pack())]
             )
             continue
         mark = "✅" if u.authorized else "🚫"
@@ -49,7 +49,7 @@ def users_keyboard(users, su_ids: set[int]) -> InlineKeyboardMarkup:
             ]
         )
     if not rows:
-        rows.append([InlineKeyboardButton(text="— нет известных пользователей —", callback_data=Cb(a="noop").pack())])
+        rows.append([InlineKeyboardButton(text="— нет известных пользователей —", callback_data=Cb(a="uinfo").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

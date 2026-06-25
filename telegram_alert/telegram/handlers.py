@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -28,7 +29,7 @@ from telegram_alert.modes import (
     AlertMode,
     ScheduleOverride,
     parse_mode,
-    parse_override,
+    resolve_override,
 )
 from telegram_alert.services.frigate import FrigateClient
 from telegram_alert.services.schedule import (
@@ -39,6 +40,7 @@ from telegram_alert.services.schedule import (
     windows_for_day,
 )
 from telegram_alert.telegram.callbacks import Cb
+from telegram_alert.telegram.commands import apply_user_commands
 from telegram_alert.telegram.keyboards import (
     WEEKDAYS,
     approval_keyboard,
@@ -62,13 +64,20 @@ def _is_superuser(settings: Settings, uid: int) -> bool:
 
 # --- helpers -------------------------------------------------------------
 
-async def _load(
-    session: AsyncSession,
-) -> tuple[AlertMode, list[Window], ScheduleOverride]:
+async def _load(session: AsyncSession) -> tuple[AlertMode, list[Window]]:
     row = await repo.get_settings_row(session)
     entries = await repo.list_schedule(session)
     windows = [Window(e.weekday, e.start_min, e.end_min) for e in entries]
-    return parse_mode(row.mode), windows, parse_override(row.override)
+    return parse_mode(row.mode), windows
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Human duration like '45 мин' or '2 ч 05 мин'."""
+    m = max(0, int(seconds // 60))
+    if m < 60:
+        return f"{m} мин"
+    h, mm = divmod(m, 60)
+    return f"{h} ч {mm:02d} мин"
 
 
 def _day_text(weekday: int, windows: list[Window]) -> str:
@@ -104,7 +113,11 @@ async def cmd_start(
         await repo.upsert_user(session, uid, username)
         authorized = await repo.is_authorized(session, uid)
 
-    if authorized or _is_superuser(settings, uid):
+    superuser = _is_superuser(settings, uid)
+    # Make the command menu match the user's current rights right away.
+    await apply_user_commands(message.bot, uid, authorized=authorized, superuser=superuser)
+
+    if authorized or superuser:
         await message.answer("👋 Привет! Бот активен. /help — список команд.")
         return
 
@@ -132,11 +145,11 @@ async def cmd_help(message: Message, settings: Settings) -> None:
         "/status — текущее состояние\n"
         "/mode — режим алертов: отключены / всегда / по расписанию\n"
         "/schedule — окна присутствия (для режима «по расписанию»)\n"
-        "/clip — запись последних действий со всех камер\n"
+        "/clip &lt;сек&gt; — запись со всех камер, напр. <code>/clip 30</code>\n"
         "\nВ режиме «по расписанию» (поверх расписания, до /auto):\n"
-        "/mute — временно заглушить уведомления\n"
-        "/unmute — временно включить уведомления\n"
-        "/auto — сбросить, вернуться к расписанию"
+        "/mute &lt;часы&gt; — заглушить на N часов, напр. <code>/mute 2</code> или <code>/mute 0.5</code>\n"
+        "/unmute &lt;часы&gt; — включить на N часов, напр. <code>/unmute 3</code>\n"
+        "/auto — сбросить override, вернуться к расписанию"
     )
     if _is_superuser(settings, message.from_user.id):
         base += (
@@ -199,6 +212,9 @@ async def _grant_revoke_cmd(message, command, session_factory, settings, value: 
     target = int(arg)
     async with session_factory() as session:
         await repo.set_authorized(session, target, value)
+    await apply_user_commands(
+        message.bot, target, authorized=value, superuser=_is_superuser(settings, target)
+    )
     word = "выдан" if value else "забран"
     await message.answer(f"✅ Доступ {word} для <code>{target}</code>.")
     if value:
@@ -215,6 +231,12 @@ async def cb_grant(query: CallbackQuery, callback_data: Cb, session_factory, set
         return
     async with session_factory() as session:
         await repo.set_authorized(session, callback_data.uid, True)
+    await apply_user_commands(
+        query.bot,
+        callback_data.uid,
+        authorized=True,
+        superuser=_is_superuser(settings, callback_data.uid),
+    )
     await query.message.edit_text(f"✅ Авторизован <code>{callback_data.uid}</code>")
     try:
         await query.bot.send_message(callback_data.uid, "✅ Тебе выдан доступ к алертам дачи.")
@@ -237,14 +259,45 @@ async def cb_utoggle(query: CallbackQuery, callback_data: Cb, session_factory, s
     if not _is_superuser(settings, query.from_user.id):
         await query.answer("⛔ Только для администратора.", show_alert=True)
         return
+    su = set(settings.telegram.superuser_ids)
+    if callback_data.uid in su:
+        await query.answer("👑 Это суперадмин — права не меняются.", show_alert=True)
+        return
+
+    # Separate sessions: set_authorized is a Core UPDATE, so reusing the session
+    # that already loaded the User would re-read the stale identity-mapped object
+    # and rebuild an identical keyboard (-> "message is not modified" crash).
     async with session_factory() as session:
         user = await repo.get_user(session, callback_data.uid)
         new_value = not (user.authorized if user else False)
+    async with session_factory() as session:
         await repo.set_authorized(session, callback_data.uid, new_value)
+    async with session_factory() as session:
         users = await repo.list_users(session)
-    su = set(settings.telegram.superuser_ids)
-    await query.message.edit_reply_markup(reply_markup=users_keyboard(users, su))
+
+    await apply_user_commands(
+        query.bot, callback_data.uid, authorized=new_value, superuser=False
+    )
+    try:
+        await query.message.edit_reply_markup(reply_markup=users_keyboard(users, su))
+    except TelegramBadRequest:
+        pass  # markup unchanged (shouldn't happen now, but stay safe)
+    if new_value:
+        try:
+            await query.bot.send_message(callback_data.uid, "✅ Тебе выдан доступ к алертам дачи.")
+        except Exception:  # noqa: BLE001
+            pass
     await query.answer("Доступ выдан" if new_value else "Доступ забран")
+
+
+@router.callback_query(Cb.filter(F.a == "su"))
+async def cb_su(query: CallbackQuery) -> None:
+    await query.answer("👑 Суперадмин — доступ всегда, права не меняются.")
+
+
+@router.callback_query(Cb.filter(F.a == "uinfo"))
+async def cb_uinfo(query: CallbackQuery) -> None:
+    await query.answer()
 
 
 # --- /status -------------------------------------------------------------
@@ -255,17 +308,26 @@ async def cmd_status(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> None:
-    async with session_factory() as session:
-        mode, windows, override = await _load(session)
     now = datetime.now(tz=settings.app.tzinfo)
+    async with session_factory() as session:
+        row = await repo.get_settings_row(session)
+        entries = await repo.list_schedule(session)
+    mode = parse_mode(row.mode)
+    windows = [Window(e.weekday, e.start_min, e.end_min) for e in entries]
+    override = resolve_override(row.override, row.override_until, now.timestamp())
     active = should_notify(now, mode, windows, override)
     lines = [
         f"Режим: <b>{MODE_LABELS[mode]}</b> ({MODE_HINTS[mode]})",
         f"➡️ Сейчас: <b>{'АКТИВНО — шлём' if active else 'подавлено'}</b>",
     ]
     if mode == AlertMode.SCHEDULE:
-        if override != ScheduleOverride.NONE:
-            lines.append(f"⏸ Override: <b>{OVERRIDE_LABELS[override]}</b> (/auto — сбросить)")
+        if override != ScheduleOverride.NONE and row.override_until is not None:
+            left = _fmt_duration(row.override_until - now.timestamp())
+            until_local = datetime.fromtimestamp(row.override_until, settings.app.tzinfo)
+            lines.append(
+                f"⏸ Override: <b>{OVERRIDE_LABELS[override]}</b> "
+                f"ещё {left} (до {until_local.strftime('%H:%M')}, /auto — сбросить)"
+            )
         today = now.weekday()
         day_windows = windows_for_day(windows, today)
         if day_windows:
@@ -285,7 +347,7 @@ async def cmd_mode(
     message: Message, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     async with session_factory() as session:
-        mode, _, _ = await _load(session)
+        mode, _ = await _load(session)
     await message.answer(_mode_text(mode), reply_markup=mode_keyboard(mode))
 
 
@@ -318,14 +380,40 @@ async def cb_noop(query: CallbackQuery) -> None:
 
 # --- temporary override (only in SCHEDULE mode) -------------------------
 
-async def _set_override(
+MAX_OVERRIDE_HOURS = 24 * 7  # неделя — выше почти наверняка опечатка
+
+
+def _parse_hours(arg: str) -> float | None:
+    """Hours as a positive number; fractions ok ('0.5', '2,5'). None if invalid."""
+    arg = arg.strip().replace(",", ".")
+    if not arg:
+        return None
+    try:
+        hours = float(arg)
+    except ValueError:
+        return None
+    if hours <= 0:
+        return None
+    return min(hours, MAX_OVERRIDE_HOURS)
+
+
+async def _apply_override(
     message: Message,
+    command: CommandObject,
     session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
     value: ScheduleOverride,
-    ok_text: str,
 ) -> None:
-    """Apply a temporary override, but only while in SCHEDULE mode.  Any new
-    override replaces the previous one (single global value)."""
+    """Apply a *temporary* override for N hours (duration is mandatory, no
+    default).  Works only in SCHEDULE mode; any new mute/unmute replaces the
+    previous one and resets its timer."""
+    hours = _parse_hours(command.args or "")
+    if hours is None:
+        await message.answer(
+            "⚠️ Укажи длительность в часах: <code>/mute 2</code>, "
+            "<code>/unmute 3</code> или дробью <code>/mute 0.5</code>."
+        )
+        return
     async with session_factory() as session:
         row = await repo.get_settings_row(session)
         mode = parse_mode(row.mode)
@@ -335,32 +423,35 @@ async def _set_override(
                 f"Сейчас: <b>{MODE_LABELS[mode]}</b>. Сменить — /mode."
             )
             return
-        await repo.set_override(session, value.value)
-    await message.answer(ok_text)
+        until = time.time() + hours * 3600
+        await repo.set_override(session, value.value, until)
+    until_local = datetime.fromtimestamp(until, settings.app.tzinfo)
+    word = "заглушены 🔕" if value == ScheduleOverride.MUTE else "включены 🔔"
+    await message.answer(
+        f"Уведомления временно {word} на {_fmt_duration(hours * 3600)} "
+        f"(до <b>{until_local.strftime('%H:%M %d.%m')}</b>).\n"
+        "/auto — сбросить раньше."
+    )
 
 
 @router.message(Command("mute"))
 async def cmd_mute(
-    message: Message, session_factory: async_sessionmaker[AsyncSession]
+    message: Message,
+    command: CommandObject,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
 ) -> None:
-    await _set_override(
-        message,
-        session_factory,
-        ScheduleOverride.MUTE,
-        "🔕 Уведомления временно заглушены поверх расписания.\n/auto — вернуть расписание.",
-    )
+    await _apply_override(message, command, session_factory, settings, ScheduleOverride.MUTE)
 
 
 @router.message(Command("unmute"))
 async def cmd_unmute(
-    message: Message, session_factory: async_sessionmaker[AsyncSession]
+    message: Message,
+    command: CommandObject,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
 ) -> None:
-    await _set_override(
-        message,
-        session_factory,
-        ScheduleOverride.UNMUTE,
-        "🔔 Уведомления временно включены поверх расписания.\n/auto — вернуть расписание.",
-    )
+    await _apply_override(message, command, session_factory, settings, ScheduleOverride.UNMUTE)
 
 
 @router.message(Command("auto"))
@@ -368,11 +459,11 @@ async def cmd_auto(
     message: Message, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     async with session_factory() as session:
-        await repo.set_override(session, ScheduleOverride.NONE.value)
+        await repo.set_override(session, ScheduleOverride.NONE.value, None)
     await message.answer("🔄 Сброшено — уведомления снова по расписанию.")
 
 
-# --- /test ---------------------------------------------------------------
+# --- /clip ---------------------------------------------------------------
 
 MAX_CLIP_SECONDS = 120
 
@@ -383,19 +474,17 @@ async def cmd_clip(
     command: CommandObject,
     broker: Broker,
     frigate: FrigateClient,
-    settings: Settings,
 ) -> None:
-    seconds = settings.frigate.clip_seconds
     arg = (command.args or "").strip().lower()
     if arg.endswith("s"):
         arg = arg[:-1].strip()
-    if arg:
-        if not arg.isdigit() or int(arg) == 0:
-            await message.answer(
-                "Формат: <code>/clip 30</code> — длина в секундах (без аргумента — по умолчанию)."
-            )
-            return
-        seconds = min(int(arg), MAX_CLIP_SECONDS)
+    if not arg or not arg.isdigit() or int(arg) == 0:
+        await message.answer(
+            "Формат: <code>/clip 30</code> — укажи длину записи в секундах."
+        )
+        return
+    requested = int(arg)
+    seconds = min(requested, MAX_CLIP_SECONDS)
 
     try:
         cameras = await frigate.list_cameras()
@@ -419,7 +508,7 @@ async def cmd_clip(
         )
         await broker.publish_job(job.model_dump_json().encode())
 
-    capped = " (макс)" if arg and int(arg) > MAX_CLIP_SECONDS else ""
+    capped = " (макс)" if requested > MAX_CLIP_SECONDS else ""
     await message.answer(
         f"🎥 Беру {seconds}-сек{capped} запись с камер: "
         f"<b>{', '.join(cameras)}</b> — разошлю всем авторизованным."

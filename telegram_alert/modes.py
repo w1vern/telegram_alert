@@ -55,3 +55,13 @@ def parse_override(value: str) -> ScheduleOverride:
         return ScheduleOverride(value)
     except ValueError:
         return ScheduleOverride.NONE
+
+
+def resolve_override(value: str, until: float | None, now_ts: float) -> ScheduleOverride:
+    """Effective override at ``now_ts``: NONE if unset or already expired."""
+    ov = parse_override(value)
+    if ov == ScheduleOverride.NONE:
+        return ScheduleOverride.NONE
+    if until is not None and now_ts >= until:
+        return ScheduleOverride.NONE
+    return ov
