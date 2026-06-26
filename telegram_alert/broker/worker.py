@@ -7,7 +7,10 @@ and MinIO, so it keeps working even while Telegram is unreachable.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import tempfile
 import time
 from datetime import datetime
 
@@ -46,7 +49,10 @@ class MediaWorker:
     async def _handle(self, payload: dict, attempt: int) -> None:
         job = MediaJob.model_validate(payload)
         if job.on_demand:
-            await self._handle_clip(job)
+            if job.start_ts is not None:
+                await self._handle_record(job)
+            else:
+                await self._handle_clip(job)
         elif job.type == "new":
             await self._handle_new(job)
         else:
@@ -90,6 +96,50 @@ class MediaWorker:
             camera=job.camera,
             ts=job.ts,
             snap_key=snap_key,
+            clip_key=clip_key if clip_available else None,
+        )
+        await self._broker.publish_outbox(out.model_dump_json().encode())
+
+    # --- /record: arbitrary past clip [start, start+len], delivered by link --
+
+    async def _handle_record(self, job: MediaJob) -> None:
+        """Cut a clip of arbitrary length from an arbitrary past timecode.
+
+        Unlike /clip this has no snapshot and may be large, so the clip is
+        streamed Frigate -> temp file -> MinIO (bounded memory) and delivered as
+        a presigned link rather than uploaded to Telegram (50 MB bot limit).
+        Idempotent: a retried job re-uses the archived clip.
+        """
+        async with self._sf() as session:
+            await repo.ensure_processed(session, job.review_id, job.camera)
+
+        assert job.start_ts is not None and job.clip_seconds is not None
+        clip_key = MinioStorage.clip_key(job.review_id)
+        clip_available = True
+        if not await self._storage.exists(clip_key):
+            start = job.start_ts
+            end = start + job.clip_seconds
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            tmp.close()
+            try:
+                await self._frigate.download_recording_clip(job.camera, start, end, tmp.name)
+            except ClipNotReady:
+                log.warning("recording clip for %s never became ready", job.review_id)
+                clip_available = False
+            else:
+                await self._storage.put_file(clip_key, tmp.name, "video/mp4")
+                async with self._sf() as session:
+                    await repo.mark_clip_archived(session, job.review_id)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp.name)
+
+        out = OutboxJob(
+            action="record",
+            review_id=job.review_id,
+            camera=job.camera,
+            ts=job.ts,
+            clip_seconds=job.clip_seconds,
             clip_key=clip_key if clip_available else None,
         )
         await self._broker.publish_outbox(out.model_dump_json().encode())

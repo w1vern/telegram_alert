@@ -38,9 +38,11 @@ from telegram_alert.services.schedule import (
     should_notify,
     windows_for_day,
 )
+from telegram_alert.services.timecode import fmt_length, parse_duration, parse_when
 from telegram_alert.telegram.callbacks import Cb
 from telegram_alert.telegram.keyboards import (
     WEEKDAYS,
+    camera_keyboard,
     day_keyboard,
     mode_keyboard,
     week_keyboard,
@@ -52,6 +54,14 @@ router = Router()
 
 class SchedFSM(StatesGroup):
     waiting_interval = State()
+
+
+class RecordFSM(StatesGroup):
+    """Interactive /record chain: pick camera -> enter timecode -> enter length."""
+
+    camera = State()
+    when = State()
+    length = State()
 
 
 # --- helpers -------------------------------------------------------------
@@ -106,6 +116,8 @@ async def cmd_help(message: Message) -> None:
         "/mode — режим алертов: отключены / всегда / по расписанию\n"
         "/schedule — окна присутствия (для режима «по расписанию»)\n"
         "/clip &lt;сек&gt; — запись со всех камер, напр. <code>/clip 30</code>\n"
+        "/record &lt;камера&gt; &lt;время&gt; &lt;длина&gt; — запись с одной камеры за заданный "
+        "период, напр. <code>/record yard 14:30 5m</code>; без аргументов — выбор по шагам\n"
         "\nВ режиме «по расписанию» (поверх расписания, до /auto):\n"
         "/mute &lt;часы&gt; — заглушить на N часов, напр. <code>/mute 2</code> или <code>/mute 0.5</code>\n"
         "/unmute &lt;часы&gt; — включить на N часов, напр. <code>/unmute 3</code>\n"
@@ -326,6 +338,176 @@ async def cmd_clip(
         f"🎥 Беру {seconds}-сек{capped} запись с камер: "
         f"<b>{', '.join(cameras)}</b> — пришлю сюда."
     )
+
+
+# --- /record: clip of a given length from a given camera at a given time --
+#
+# Robustness note: like /clip, this handler only *publishes* a MediaJob and
+# returns immediately. The (possibly very long) download runs in the MediaWorker,
+# which consumes jobs concurrently, so a slow /record never blocks the bot from
+# accepting further commands — and a crash/retry can't lose work (durable queue).
+
+_RECORD_HINT = (
+    "Формат: <code>/record &lt;камера&gt; &lt;время&gt; &lt;длина&gt;</code>\n"
+    "Напр. <code>/record yard 26.06.2026 14:30 5m</code> или "
+    "<code>/record yard 14:30 90s</code>.\n"
+    "Без аргументов — выбор по шагам."
+)
+
+
+async def _list_cameras_or_warn(message: Message, frigate: FrigateClient) -> list[str] | None:
+    try:
+        cameras = await frigate.list_cameras()
+    except Exception:  # noqa: BLE001
+        log.exception("/record: failed to read Frigate config")
+        await message.answer("⚠️ Не удалось обратиться к Frigate.")
+        return None
+    if not cameras:
+        await message.answer("⚠️ В конфиге Frigate нет камер.")
+        return None
+    return cameras
+
+
+async def _enqueue_record(
+    message: Message,
+    broker: Broker,
+    settings: Settings,
+    camera: str,
+    start_ts: float,
+    length: int,
+) -> None:
+    """Validate the requested window against 'now' and publish the job."""
+    now_ts = time.time()
+    if start_ts >= now_ts:
+        await message.answer("⚠️ Время в будущем — записи ещё нет.")
+        return
+    # Recordings only exist for the past; the trailing edge must already be
+    # written. Clamp the end to a couple seconds ago (segment finalized) and
+    # cut the clip shorter if it would run into the present.
+    end_ts = min(start_ts + length, now_ts - 2)
+    actual = int(end_ts - start_ts)
+    if actual <= 0:
+        await message.answer("⚠️ Слишком близко к настоящему — запись ещё не готова.")
+        return
+
+    review_id = f"record-{int(start_ts)}-{int(now_ts)}-{camera}"
+    job = MediaJob(
+        type="new",
+        on_demand=True,
+        review_id=review_id,
+        camera=camera,
+        ts=start_ts,
+        start_ts=start_ts,
+        clip_seconds=actual,
+    )
+    await broker.publish_job(job.model_dump_json().encode())
+
+    when = datetime.fromtimestamp(start_ts, settings.app.tzinfo).strftime("%H:%M:%S %d.%m.%Y")
+    note = " (обрезано до настоящего момента)" if actual < length else ""
+    await message.answer(
+        f"🎬 Готовлю запись с камеры <b>{camera}</b> с {when}, длина "
+        f"{fmt_length(actual)}{note}. Пришлю ссылку сюда, как будет готово."
+    )
+
+
+@router.message(Command("record"))
+async def cmd_record(
+    message: Message,
+    command: CommandObject,
+    state: FSMContext,
+    broker: Broker,
+    frigate: FrigateClient,
+    settings: Settings,
+) -> None:
+    await state.clear()
+    args = (command.args or "").strip()
+    if not args:
+        cameras = await _list_cameras_or_warn(message, frigate)
+        if cameras is None:
+            return
+        await state.set_state(RecordFSM.camera)
+        await state.update_data(cameras=cameras)
+        await message.answer("🎬 Выбери камеру:", reply_markup=camera_keyboard(cameras))
+        return
+
+    # One-shot: "<camera> <date... > <length>". The timecode may contain a space
+    # (date + time), so the camera is the first token and the length the last.
+    tokens = args.split()
+    if len(tokens) < 3:
+        await message.answer(_RECORD_HINT)
+        return
+    camera, when_raw, length_raw = tokens[0], " ".join(tokens[1:-1]), tokens[-1]
+
+    cameras = await _list_cameras_or_warn(message, frigate)
+    if cameras is None:
+        return
+    if camera not in cameras:
+        await message.answer(
+            f"⚠️ Камера <b>{camera}</b> не найдена. Есть: <b>{', '.join(cameras)}</b>."
+        )
+        return
+
+    now = datetime.now(tz=settings.app.tzinfo)
+    try:
+        start_ts = parse_when(when_raw, settings.app.tzinfo, now)
+        length = parse_duration(length_raw)
+    except ValueError as e:
+        await message.answer(f"⚠️ {e}")
+        return
+    await _enqueue_record(message, broker, settings, camera, start_ts, length)
+
+
+@router.callback_query(RecordFSM.camera, Cb.filter(F.a == "rec_cam"))
+async def cb_record_camera(
+    query: CallbackQuery, callback_data: Cb, state: FSMContext
+) -> None:
+    data = await state.get_data()
+    cameras = data.get("cameras") or []
+    if not 0 <= callback_data.idx < len(cameras):
+        await query.answer("Камера не найдена, начни заново: /record", show_alert=True)
+        await state.clear()
+        return
+    camera = cameras[callback_data.idx]
+    await state.update_data(camera=camera)
+    await state.set_state(RecordFSM.when)
+    await query.message.edit_text(
+        f"Камера: <b>{camera}</b>\n"
+        "Введи время начала, напр. <code>14:30</code>, <code>26.06 14:30</code> "
+        "или <code>26.06.2026 14:30:00</code>:"
+    )
+    await query.answer()
+
+
+@router.message(RecordFSM.when)
+async def on_record_when(message: Message, state: FSMContext, settings: Settings) -> None:
+    now = datetime.now(tz=settings.app.tzinfo)
+    try:
+        start_ts = parse_when(message.text or "", settings.app.tzinfo, now)
+    except ValueError as e:
+        await message.answer(f"⚠️ {e}")
+        return
+    await state.update_data(start_ts=start_ts)
+    await state.set_state(RecordFSM.length)
+    await message.answer(
+        "Введи длину записи, напр. <code>30s</code>, <code>5m</code>, "
+        "<code>1h30m</code> или <code>5:00</code>:"
+    )
+
+
+@router.message(RecordFSM.length)
+async def on_record_length(
+    message: Message, state: FSMContext, broker: Broker, settings: Settings
+) -> None:
+    try:
+        length = parse_duration(message.text or "")
+    except ValueError as e:
+        await message.answer(f"⚠️ {e}")
+        return
+    data = await state.get_data()
+    camera = data["camera"]
+    start_ts = float(data["start_ts"])
+    await state.clear()
+    await _enqueue_record(message, broker, settings, camera, start_ts, length)
 
 
 # --- /schedule -----------------------------------------------------------

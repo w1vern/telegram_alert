@@ -22,6 +22,7 @@ COMMANDS = [
     BotCommand(command="mode", description="Режим алертов"),
     BotCommand(command="schedule", description="Окна присутствия"),
     BotCommand(command="clip", description="Запись со всех камер: /clip 30"),
+    BotCommand(command="record", description="Запись с камеры за период: /record"),
     BotCommand(command="mute", description="Заглушить на N часов: /mute 2"),
     BotCommand(command="unmute", description="Включить на N часов: /unmute 2"),
     BotCommand(command="auto", description="Сбросить override, вернуть расписание"),

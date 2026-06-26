@@ -29,6 +29,11 @@ class MediaJob(BaseModel):
     on_demand: bool = False
     # Requested clip length in seconds (None -> use FRIGATE_CLIP_SECONDS).
     clip_seconds: int | None = None
+    # Absolute start of an on-demand clip (epoch seconds). When set, the worker
+    # cuts [start_ts, start_ts + clip_seconds] from continuous recordings — the
+    # /record command, an arbitrary past timecode. When None, on_demand pulls the
+    # *last* clip_seconds ending ~now (the /clip command).
+    start_ts: float | None = None
 
 
 class OutboxJob(BaseModel):
@@ -36,9 +41,11 @@ class OutboxJob(BaseModel):
     dead proxy and a service restart; media is already in MinIO."""
 
     kind: Literal["outbox"] = "outbox"
-    action: Literal["photo_alert", "attach_clip", "clip"]
+    action: Literal["photo_alert", "attach_clip", "clip", "record"]
     review_id: str
     camera: str
     ts: float
     snap_key: str | None = None
     clip_key: str | None = None
+    # Clip length in seconds — used by the /record caption (action == "record").
+    clip_seconds: int | None = None

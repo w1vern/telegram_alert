@@ -33,6 +33,16 @@ def mode_keyboard(current: AlertMode) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def camera_keyboard(cameras: list[str]) -> InlineKeyboardMarkup:
+    """One button per camera for the /record flow. Cameras are referenced by
+    index (stored in FSM state) to keep callback data short and ascii-safe."""
+    rows = [
+        [InlineKeyboardButton(text=cam, callback_data=Cb(a="rec_cam", idx=i).pack())]
+        for i, cam in enumerate(cameras)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def week_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row: list[InlineKeyboardButton] = []

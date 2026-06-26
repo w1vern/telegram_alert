@@ -69,6 +69,15 @@ class MinioStorage:
         await asyncio.to_thread(_put)
         log.info("MinIO put %s (%d bytes)", key, len(data))
 
+    async def put_file(self, key: str, path: str, content_type: str) -> None:
+        """Upload an on-disk file (used for large /record clips streamed to a
+        temp file, so we never hold the whole video in memory)."""
+        def _put() -> None:
+            self._client.fput_object(self._cfg.bucket, key, path, content_type=content_type)
+
+        await asyncio.to_thread(_put)
+        log.info("MinIO put %s (from file %s)", key, path)
+
     async def get(self, key: str) -> bytes:
         def _get() -> bytes:
             resp = self._client.get_object(self._cfg.bucket, key)

@@ -30,6 +30,7 @@ from telegram_alert.telegram.notify import (
     clip_caption,
     clip_keyboard,
     clip_unavailable_keyboard,
+    record_caption,
 )
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ class OutboxSender:
         job = OutboxJob.model_validate(payload)
         if job.action == "attach_clip":
             await self._attach_clip(job)
+        elif job.action == "record":
+            await self._send_record(job)
         else:
             # photo_alert (event) and clip (/clip) are identical: a photo with a
             # caption and, when the clip is archived, a button linking to the
@@ -96,6 +99,35 @@ class OutboxSender:
             log.warning("photo for review %s skipped permanently: %s", job.review_id, e)
             return
         # Any other error (network/proxy/5xx) propagates -> delayed retry.
+        async with self._sf() as session:
+            await repo.record_sent(
+                session, job.review_id, msg.message_id, clip_attached=bool(job.clip_key)
+            )
+
+    async def _send_record(self, job: OutboxJob) -> None:
+        """/record delivery: a text message with a button linking to the MinIO
+        clip (or 'unavailable' when Frigate never produced it). No photo — the
+        current frame would not match the requested past timecode. Idempotent
+        via ``sent_messages`` like the other actions."""
+        async with self._sf() as session:
+            if await repo.get_sent(session, job.review_id) is not None:
+                return
+
+        caption = record_caption(job.camera, job.ts, job.clip_seconds or 0, self._s.app.tzinfo)
+        if job.clip_key:
+            url = await self._storage.presigned_get(job.clip_key)
+            kb = clip_keyboard(url)
+        else:
+            kb = clip_unavailable_keyboard()
+
+        try:
+            msg = await self._bot.send_message(
+                self._s.telegram.chat_id, caption, reply_markup=kb
+            )
+        except _PERMANENT as e:
+            log.warning("record for review %s skipped permanently: %s", job.review_id, e)
+            return
+        # network/proxy/5xx propagates -> delayed retry.
         async with self._sf() as session:
             await repo.record_sent(
                 session, job.review_id, msg.message_id, clip_attached=bool(job.clip_key)

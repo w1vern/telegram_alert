@@ -128,6 +128,12 @@ class FrigateSettings(_Base):
     # Frigate recovers; only after it elapses does the clip become best-effort
     # "unavailable" (no exception escapes — see FrigateClient._poll_clip).
     clip_timeout: int = 120
+    # /record can ask for long clips from an arbitrary past timecode; Frigate
+    # assembles them on demand and a longer clip takes longer to build. How long
+    # (seconds) to keep polling for a recording clip before giving up. Kept well
+    # under RabbitMQ's default 30-min consumer ack timeout so the streaming
+    # download still finishes within the window.
+    record_timeout: int = 600
     request_timeout: int = 30
     # Snapshot rendering overrides passed to Frigate's snapshot API. Frigate only
     # decodes the DETECT stream, so this is the hard ceiling — for sharper images

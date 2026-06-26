@@ -145,6 +145,48 @@ class FrigateClient:
         path = f"/api/{camera}/start/{start:.3f}/end/{end:.3f}/clip.mp4"
         return await self._poll_clip(path, f"recording clip for {camera}", max_delay=8.0)
 
+    async def download_recording_clip(
+        self, camera: str, start: float, end: float, dest_path: str
+    ) -> None:
+        """Stream a recording clip [start, end] straight to ``dest_path``.
+
+        Like :meth:`get_recording_clip` but built for arbitrarily long clips
+        (the /record command): Frigate assembles the mp4 on demand, so poll
+        until it is ready, then stream the body to disk in chunks — never
+        buffering the whole file in memory. A not-ready status (404) and a
+        transport blip (Frigate restarting) are both transient and retried
+        within ``record_timeout``; only when that elapses do we give up with
+        :class:`ClipNotReady` (callers treat it as 'clip unavailable').
+        """
+        path = f"/api/{camera}/start/{start:.3f}/end/{end:.3f}/clip.mp4"
+        deadline = asyncio.get_event_loop().time() + self._cfg.record_timeout
+        delay = 2.0
+        last = "?"
+        # No read timeout: a large clip streams for a while and the chunks keep
+        # the transfer alive; the deadline above bounds the *generation* wait.
+        timeout = httpx.Timeout(self._cfg.request_timeout, read=None)
+        while True:
+            if not self._logged_in:
+                await self._login()
+            try:
+                async with self._client.stream("GET", path, timeout=timeout) as resp:
+                    if resp.status_code == 200:
+                        with open(dest_path, "wb") as f:
+                            async for chunk in resp.aiter_bytes(1 << 20):
+                                f.write(chunk)
+                        return
+                    if resp.status_code == 401:
+                        self._logged_in = False
+                    last = f"status {resp.status_code}"
+                    await resp.aread()  # drain the body so the loop can retry cleanly
+            except httpx.RequestError as e:
+                self._logged_in = False  # stale connection after a restart
+                last = f"transport error ({e})"
+            if asyncio.get_event_loop().time() >= deadline:
+                raise ClipNotReady(f"recording clip for {camera} not ready (last: {last})")
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 8.0)
+
     async def get_snapshot(self, event_id: str) -> bytes:
         return await self._fetch_bytes(
             f"/api/events/{event_id}/snapshot.jpg", self._snapshot_params("height")
